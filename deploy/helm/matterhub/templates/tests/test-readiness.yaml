@@ -1,0 +1,42 @@
+# `helm test <release>` runs this pod after a deploy: it calls the Service from inside
+# the cluster and fails unless /readyz (database reachable) and /version both answer.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ printf "%s-test" (include "matterhub.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: smoke
+      image: {{ include "matterhub.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          base = "http://{{ include "matterhub.fullname" . }}:{{ .Values.service.port }}"
+          for path in ("/readyz", "/version"):
+              with urllib.request.urlopen(base + path, timeout=5) as r:
+                  print(path, r.status, json.loads(r.read()))
+                  if r.status != 200:
+                      sys.exit(1)
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        {{- toYaml .Values.containerSecurityContext | nindent 8 }}

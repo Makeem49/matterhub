@@ -1,0 +1,44 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "matterhub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.labels" . | nindent 4 }}
+  annotations:
+    {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.keyVaultCertificateUri }}
+    kubernetes.azure.com/tls-cert-keyvault-uri: {{ .Values.ingress.tls.keyVaultCertificateUri | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ required "ingress.host is required" .Values.ingress.host | quote }}
+      secretName: {{ printf "keyvault-%s" (include "matterhub.fullname" .) }}
+  {{- end }}
+  rules:
+    - host: {{ required "ingress.host is required" .Values.ingress.host | quote }}
+      http:
+        # Only the API and version endpoints are public. /metrics, /healthz and /readyz
+        # stay inside the cluster.
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "matterhub.fullname" . }}
+                port:
+                  name: http
+          - path: /version
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "matterhub.fullname" . }}
+                port:
+                  name: http
+{{- end }}

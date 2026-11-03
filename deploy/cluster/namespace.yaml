@@ -1,0 +1,49 @@
+# One-off cluster bootstrap, applied by a platform admin (the pipeline identity is only
+# an admin *inside* this namespace and cannot create namespaces):
+#
+#   az aks get-credentials -g rg-matterhub-dev -n aks-matterhub-dev && kubelogin convert-kubeconfig -l azurecli
+#   kubectl apply -f deploy/cluster/namespace.yaml
+#
+# Pod Security Admission "restricted" rejects any pod that runs as root, escalates
+# privileges, keeps Linux capabilities or lacks a seccomp profile.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: matterhub
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: matterhub
+---
+# Caps what the namespace can consume so a runaway HPA or bad deploy cannot starve the
+# cluster. Sized for prod (max 10 API pods at 1 CPU / 512Mi limits, plus jobs).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: matterhub-quota
+  namespace: matterhub
+spec:
+  hard:
+    requests.cpu: "6"
+    requests.memory: 8Gi
+    limits.cpu: "14"
+    limits.memory: 12Gi
+    pods: "30"
+---
+# Defaults for any container that forgets to set resources.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: matterhub-defaults
+  namespace: matterhub
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 384Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi

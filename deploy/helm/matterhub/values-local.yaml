@@ -1,0 +1,45 @@
+# Local kind cluster (scripts/kind-up.sh). No Azure dependencies:
+# PostgreSQL runs in-cluster and its password is a plain Kubernetes Secret.
+environment: local
+
+image:
+  repository: matterhub
+  tag: local
+  pullPolicy: Never   # image is side-loaded with `kind load docker-image`
+
+replicaCount: 1
+
+config:
+  authMode: disabled
+  logLevel: DEBUG
+  database:
+    host: postgres
+    sslmode: disable
+
+workloadIdentity:
+  enabled: false
+
+keyVault:
+  enabled: false
+
+existingSecret:
+  name: matterhub-db
+  passwordKey: database-password
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
+networkPolicy:
+  enabled: false      # kindnet does not enforce NetworkPolicy
+
+serviceMonitor:
+  enabled: false
+
+topologySpread:
+  enabled: false
+
+retention:
+  schedule: "*/15 * * * *"

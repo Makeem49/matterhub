@@ -1,0 +1,55 @@
+{{- if .Values.retention.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-retention" (include "matterhub.fullname" .) | trunc 52 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retention
+spec:
+  schedule: {{ .Values.retention.schedule | quote }}
+  timeZone: {{ .Values.retention.timeZone | quote }}
+  concurrencyPolicy: Forbid      # never run two retention jobs at once
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: {{ .Values.retention.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.retention.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # safe: the job is idempotent
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            {{- include "matterhub.podLabels" . | nindent 12 }}
+            app.kubernetes.io/component: retention
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "matterhub.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: retention
+              image: {{ include "matterhub.image" . | quote }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["retention"{{ if .Values.retention.dryRun }}, "--dry-run"{{ end }}]
+              env:
+                {{- include "matterhub.env" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.containerSecurityContext | nindent 16 }}
+              volumeMounts:
+                {{- include "matterhub.volumeMounts" . | nindent 16 }}
+          volumes:
+            {{- include "matterhub.volumes" (dict "root" . "spc" (include "matterhub.fullname" .)) | nindent 12 }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

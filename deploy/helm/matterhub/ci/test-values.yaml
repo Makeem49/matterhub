@@ -1,0 +1,27 @@
+# Values used by CI (`helm lint`, `helm template | kubeconform`) so that every `required`
+# value is satisfied and every optional template is rendered.
+workloadIdentity:
+  clientId: 00000000-0000-0000-0000-000000000001
+keyVault:
+  name: kv-matterhub-ci
+  tenantId: 00000000-0000-0000-0000-000000000002
+config:
+  entraTenantId: 00000000-0000-0000-0000-000000000002
+  entraAudience: api://matterhub-ci
+  applicationInsightsConnectionString: InstrumentationKey=00000000-0000-0000-0000-000000000003
+  database:
+    host: psql-matterhub-ci.postgres.database.azure.com
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+ingress:
+  enabled: true
+  host: matterhub-ci.example.com
+  tls:
+    keyVaultCertificateUri: https://kv-matterhub-ci.vault.azure.net/certificates/matterhub
+nodeSelector:
+  agentpool: user
+tolerations:
+  - key: workload
+    operator: Equal
+    value: matterhub
+    effect: NoSchedule

@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Keeps the API available while AKS drains nodes for upgrades and node-image patching.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "matterhub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "matterhub.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+{{- end }}

@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny for every MatterHub pod, then allow only what is needed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "matterhub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "matterhub.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Ingress controller (AKS application routing add-on) to the API.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Managed Prometheus scrapers (ama-metrics) and kubelet probes run from kube-system.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Helm test pod from this release.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "matterhub.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL Flexible Server in its delegated subnet
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.databaseCidr }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    # HTTPS to Entra ID (token signing keys) and Application Insights ingestion.
+    # In production this is further restricted by Azure Firewall FQDN rules.
+    - ports:
+        - port: 443
+          protocol: TCP
+    # The release's own Service (Helm test pod -> API)
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "matterhub.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: 8000
+          protocol: TCP
+{{- end }}

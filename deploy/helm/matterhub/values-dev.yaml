@@ -1,0 +1,26 @@
+# Development environment (AKS: aks-matterhub-dev). Identifiers come from Terraform outputs
+# and are passed by the pipeline:
+#   --set workloadIdentity.clientId=... --set keyVault.name=... --set keyVault.tenantId=...
+#   --set config.entraTenantId=... --set config.entraAudience=... --set config.database.host=...
+#   --set image.digest=sha256:...
+environment: dev
+
+image:
+  repository: acrmatterhubdev.azurecr.io/matterhub
+
+config:
+  logLevel: DEBUG
+
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 3
+
+podDisruptionBudget:
+  minAvailable: 0   # dev runs a single replica; allow node drains
+
+ingress:
+  enabled: true
+  host: matterhub-dev.example.com
+
+retention:
+  dryRun: true      # dev reports what it would flag without changing data

@@ -1,0 +1,134 @@
+# Default values. Environment overlays: values-dev.yaml, values-prod.yaml, values-local.yaml.
+# Values that come from Terraform outputs (client ID, Key Vault name, DB host...) are set
+# by the pipeline with --set, so no environment-specific identifiers live in git.
+
+nameOverride: ""
+fullnameOverride: ""
+environment: dev
+
+image:
+  repository: acrmatterhubdev.azurecr.io/matterhub
+  # Pipelines deploy by digest (immutable). Tag is the fallback (defaults to appVersion).
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+config:
+  logLevel: INFO
+  authMode: entra            # "disabled" is rejected by the app in staging/prod
+  entraTenantId: ""
+  entraAudience: ""
+  retentionYears: 7
+  applicationInsightsConnectionString: ""
+  database:
+    host: ""
+    port: 5432
+    name: matterhub
+    user: matterhub
+    sslmode: require
+
+# Microsoft Entra Workload ID: pods get a federated token for a user-assigned managed
+# identity. No client secrets anywhere.
+workloadIdentity:
+  enabled: true
+  clientId: ""
+
+# Secrets are mounted from Azure Key Vault by the Secrets Store CSI driver as files.
+# They are never synced into Kubernetes Secret objects.
+keyVault:
+  enabled: true
+  name: ""
+  tenantId: ""
+  databasePasswordSecretName: matterhub-db-password
+
+# Only used when keyVault.enabled=false (e.g. the local kind cluster).
+existingSecret:
+  name: ""
+  passwordKey: database-password
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: webapprouting.kubernetes.azure.com   # AKS application routing add-on
+  host: ""
+  tls:
+    enabled: true
+    # Certificate stored in Key Vault, served by the app routing add-on.
+    keyVaultCertificateUri: ""
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: 500m
+    memory: 384Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: app-routing-system
+  # Private subnet of the PostgreSQL Flexible Server (VNet integration).
+  databaseCidr: 10.20.2.0/24
+
+serviceMonitor:
+  enabled: true
+  # Azure Monitor managed Prometheus uses its own API group for the CRDs.
+  apiVersion: azmonitoring.coreos.com/v1
+  interval: 30s
+
+migrations:
+  enabled: true
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+
+retention:
+  enabled: true
+  schedule: "30 2 * * *"
+  timeZone: Europe/London
+  dryRun: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+terminationGracePeriodSeconds: 30
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+topologySpread:
+  enabled: true

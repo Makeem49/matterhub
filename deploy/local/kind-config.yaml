@@ -1,0 +1,9 @@
+# Two-node kind cluster so pod spreading, PDBs and node drains can be practised locally.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: matterhub
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      topology.kubernetes.io/zone: local-a

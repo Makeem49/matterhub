@@ -1,0 +1,20 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Picked up by Azure Monitor managed Prometheus (ama-metrics), which watches
+# ServiceMonitor/PodMonitor resources in the azmonitoring.coreos.com API group.
+apiVersion: {{ .Values.serviceMonitor.apiVersion }}
+kind: ServiceMonitor
+metadata:
+  name: {{ include "matterhub.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "matterhub.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "matterhub.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

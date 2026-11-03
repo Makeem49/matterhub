@@ -1,0 +1,32 @@
+# Production environment (AKS: aks-matterhub-prod, zone-redundant node pools).
+environment: prod
+
+image:
+  repository: acrmatterhubprod.azurecr.io/matterhub
+
+config:
+  logLevel: INFO
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  minReplicas: 3      # one per availability zone
+  maxReplicas: 10
+
+podDisruptionBudget:
+  minAvailable: 2
+
+priorityClassName: ""
+
+ingress:
+  enabled: true
+  host: matterhub.example.com
+
+nodeSelector:
+  agentpool: user     # keep workloads off the system node pool

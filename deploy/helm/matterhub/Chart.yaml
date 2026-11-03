@@ -1,0 +1,10 @@
+apiVersion: v2
+name: matterhub
+description: MatterHub API, database migration hook and retention CronJob for AKS
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.29.0-0"
+keywords: [matterhub, fastapi, aks]
+maintainers:
+  - name: Akeem Moshood
