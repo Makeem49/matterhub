@@ -1,0 +1,9 @@
+# Development and CI tooling, constrained to the same versions as production.
+#   pip-compile --strip-extras --output-file=requirements-dev.txt requirements-dev.in
+-c requirements.txt
+pytest
+pytest-cov
+httpx
+ruff
+mypy
+pip-audit
