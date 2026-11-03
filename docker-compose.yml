@@ -1,0 +1,103 @@
+# Local development stack: API + PostgreSQL + Prometheus + Grafana.
+#
+#   docker compose up --build          # API on :8000, Prometheus :9090, Grafana :3000
+#   docker compose run --rm retention  # run the retention job once
+#   docker compose down -v             # stop and delete data
+#
+# Credentials below are for local use only. Real environments read secrets from Key Vault.
+
+name: matterhub
+
+x-app-env: &app-env
+  MATTERHUB_ENVIRONMENT: local
+  MATTERHUB_AUTH_MODE: disabled
+  MATTERHUB_LOG_JSON: "true"
+  MATTERHUB_DATABASE_HOST: postgres
+  MATTERHUB_DATABASE_NAME: matterhub
+  MATTERHUB_DATABASE_USER: matterhub
+  MATTERHUB_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
+  MATTERHUB_DATABASE_SSLMODE: disable
+
+x-hardening: &hardening
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: matterhub
+      POSTGRES_USER: matterhub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-dev-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U matterhub -d matterhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  migrate:
+    build:
+      context: ./app
+      args:
+        GIT_SHA: ${GIT_SHA:-local}
+    image: matterhub:local
+    command: ["migrate"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    <<: *hardening
+
+  api:
+    image: matterhub:local
+    command: ["serve"]
+    environment: *app-env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    <<: *hardening
+
+  retention:
+    image: matterhub:local
+    command: ["retention"]
+    environment: *app-env
+    profiles: ["jobs"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    <<: *hardening
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on: [api]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-local-dev-only}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on: [prometheus]
+
+volumes:
+  pgdata:

@@ -1,0 +1,8 @@
+// 5xx responses by route and status, 5-minute bins, last 2 hours.
+ContainerLogV2
+| where TimeGenerated > ago(2h)
+| where ContainerName == "api" and PodNamespace startswith "matterhub"
+| extend log = todynamic(LogMessage)
+| where log.message == "request" and toint(log.status) >= 500
+| summarize errors = count() by bin(TimeGenerated, 5m), route = tostring(log.route), status = toint(log.status)
+| order by TimeGenerated desc

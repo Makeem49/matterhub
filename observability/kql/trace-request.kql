@@ -1,0 +1,9 @@
+// Every log line for one request across all pods. Replace the ID.
+let requestId = "paste-x-request-id-here";
+ContainerLogV2
+| where TimeGenerated > ago(7d)
+| where PodNamespace startswith "matterhub"
+| extend log = todynamic(LogMessage)
+| where tostring(log.request_id) == requestId
+| project TimeGenerated, PodName, level = tostring(log.level), logger = tostring(log.logger), message = tostring(log.message), log
+| order by TimeGenerated asc

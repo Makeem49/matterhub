@@ -1,0 +1,80 @@
+# Alert rules for MatterHub. The SLOs these protect are defined in docs/slo.md:
+#   availability: 99.5% of API requests succeed (non-5xx) over 30 days
+#   latency:      95% of API requests complete in under 500 ms
+#
+# Burn-rate alerts follow the multi-window approach from the Google SRE workbook:
+# page when the error budget is burning fast, raise a ticket when it burns slowly.
+# The same rules are deployed to Azure Monitor managed Prometheus by Terraform
+# (infra/terraform/modules/monitoring/prometheus_rules.tf). Every alert links to a runbook.
+
+groups:
+  - name: matterhub.recording
+    rules:
+      - record: matterhub:http_requests:rate5m
+        expr: sum(rate(http_requests_total{route=~"/api/.*"}[5m]))
+      - record: matterhub:http_errors:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{route=~"/api/.*",status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(http_requests_total{route=~"/api/.*"}[5m])), 1e-9)
+      - record: matterhub:http_errors:ratio_rate1h
+        expr: |
+          sum(rate(http_requests_total{route=~"/api/.*",status=~"5.."}[1h]))
+          /
+          clamp_min(sum(rate(http_requests_total{route=~"/api/.*"}[1h])), 1e-9)
+      - record: matterhub:http_errors:ratio_rate6h
+        expr: |
+          sum(rate(http_requests_total{route=~"/api/.*",status=~"5.."}[6h]))
+          /
+          clamp_min(sum(rate(http_requests_total{route=~"/api/.*"}[6h])), 1e-9)
+      - record: matterhub:http_latency_seconds:p95_5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{route=~"/api/.*"}[5m])))
+
+  - name: matterhub.alerts
+    rules:
+      - alert: MatterHubApiDown
+        expr: up{job="matterhub-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MatterHub API target is down"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for 2 minutes."
+          runbook_url: "docs/runbooks/api-unavailable.md"
+
+      # 14.4x burn for 1h uses 2% of the 30-day budget: page someone now.
+      - alert: MatterHubErrorBudgetFastBurn
+        expr: |
+          matterhub:http_errors:ratio_rate1h > (14.4 * 0.005)
+          and
+          matterhub:http_errors:ratio_rate5m > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MatterHub is burning its error budget fast"
+          description: "5xx ratio is {{ $value | humanizePercentage }} (SLO allows 0.5%)."
+          runbook_url: "docs/runbooks/high-error-rate.md"
+
+      # 6x burn for 6h uses 5% of the budget: raise a ticket for working hours.
+      - alert: MatterHubErrorBudgetSlowBurn
+        expr: matterhub:http_errors:ratio_rate6h > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MatterHub error budget is burning steadily"
+          description: "6h 5xx ratio is {{ $value | humanizePercentage }}."
+          runbook_url: "docs/runbooks/high-error-rate.md"
+
+      - alert: MatterHubHighLatency
+        expr: matterhub:http_latency_seconds:p95_5m > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MatterHub p95 latency above 500 ms"
+          description: "p95 latency is {{ $value | humanizeDuration }}."
+          runbook_url: "docs/runbooks/high-latency.md"

@@ -1,0 +1,7 @@
+// Latest restart count and last termination reason per container (Container Insights inventory).
+KubePodInventory
+| where TimeGenerated > ago(24h)
+| where Namespace startswith "matterhub"
+| summarize arg_max(TimeGenerated, ContainerRestartCount, ContainerStatusReason, PodStatus) by Name, ContainerName
+| where ContainerRestartCount > 0
+| order by ContainerRestartCount desc

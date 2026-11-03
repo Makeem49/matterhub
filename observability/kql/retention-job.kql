@@ -1,0 +1,8 @@
+// Outcome of each retention CronJob run.
+ContainerLogV2
+| where TimeGenerated > ago(14d)
+| where PodNamespace startswith "matterhub" and PodName has "retention"
+| extend log = todynamic(LogMessage)
+| where log.message in ("retention_job_complete", "retention_job_failed")
+| project TimeGenerated, PodName, outcome = tostring(log.message), flagged = toint(log.flagged), dry_run = tobool(log.dry_run)
+| order by TimeGenerated desc

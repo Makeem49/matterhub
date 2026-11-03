@@ -1,0 +1,9 @@
+// 401/403 trends and the principals that were denied (security monitoring).
+ContainerLogV2
+| where TimeGenerated > ago(24h)
+| where PodNamespace startswith "matterhub"
+| extend log = todynamic(LogMessage)
+| where log.message in ("token_rejected", "access_denied")
+   or (log.message == "request" and toint(log.status) in (401, 403))
+| summarize events = count() by bin(TimeGenerated, 15m), message = tostring(log.message), reason = tostring(log.reason), principal = tostring(log.principal)
+| order by TimeGenerated desc

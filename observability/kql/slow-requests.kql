@@ -1,0 +1,14 @@
+// p50/p95/p99 latency per route and the slowest individual requests.
+let window = 1h;
+let requests = ContainerLogV2
+| where TimeGenerated > ago(window)
+| where ContainerName == "api" and PodNamespace startswith "matterhub"
+| extend log = todynamic(LogMessage)
+| where log.message == "request" and tostring(log.route) startswith "/api/"
+| extend route = tostring(log.route), duration_ms = todouble(log.duration_ms), request_id = tostring(log.request_id);
+requests
+| summarize p50 = percentile(duration_ms, 50), p95 = percentile(duration_ms, 95), p99 = percentile(duration_ms, 99), count() by route
+| order by p95 desc;
+requests
+| top 20 by duration_ms desc
+| project TimeGenerated, PodName, route, duration_ms, request_id
