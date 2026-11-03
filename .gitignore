@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+junit.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+*.db
+
+# Secrets and local config - never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+kubeconfig*
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+# The provider lock file IS committed once generated for all platforms:
+#   terraform providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=windows_amd64
+
+# Bicep build output
+infra/bicep/*.json
+!infra/bicep/bicepconfig.json
+
+# Helm
+deploy/helm/**/charts/*.tgz
+rendered/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
