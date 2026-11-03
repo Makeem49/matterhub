@@ -1,0 +1,121 @@
+# Continuous delivery: build once, deploy the same image digest everywhere.
+#
+#   build -> push to dev ACR (signed provenance + SBOM) -> scan by digest
+#         -> deploy dev (Helm --atomic, helm test, smoke test)
+#         -> [manual approval: GitHub environment "prod"]
+#         -> promote image to prod ACR (az acr import, server-side copy)
+#         -> deploy prod on a self-hosted runner inside the prod VNet (private AKS)
+#
+# Azure access uses OpenID Connect federation: no client secrets are stored in GitHub.
+name: cd
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "deploy/helm/**"
+      - ".github/workflows/cd.yml"
+      - ".github/workflows/_deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # request the OIDC token for azure/login
+
+# Never cancel a deployment half-way; queue the next one instead.
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and publish image
+    runs-on: ubuntu-latest
+    environment: dev
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: meta
+        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Log in to ACR with the federated identity
+        run: az acr login --name "${{ vars.ACR_NAME }}"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          push: true
+          provenance: mode=max # SLSA provenance attestation
+          sbom: true # SPDX SBOM attached to the image
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/matterhub:${{ github.sha }}
+            ${{ vars.ACR_NAME }}.azurecr.io/matterhub:${{ steps.meta.outputs.version }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Scan the pushed image by digest
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ vars.ACR_NAME }}.azurecr.io/matterhub@${{ steps.push.outputs.digest }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Summary
+        run: |
+          {
+            echo "### Image published"
+            echo "- digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- version: \`${{ steps.meta.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-dev:
+    name: Deploy dev
+    needs: build
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: dev
+      image_digest: ${{ needs.build.outputs.digest }}
+      runs_on: '"ubuntu-latest"'
+    secrets: inherit
+
+  promote:
+    name: Promote image to prod registry
+    needs: [build, deploy-dev]
+    runs-on: [self-hosted, linux, matterhub-prod]
+    environment: prod # required reviewers approve here
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Import exactly the digest that passed dev
+        run: |
+          az acr import \
+            --name "${{ vars.ACR_NAME }}" \
+            --source "${{ vars.DEV_ACR_NAME }}.azurecr.io/matterhub@${{ needs.build.outputs.digest }}" \
+            --image "matterhub:${{ github.sha }}" \
+            --image "matterhub:${{ needs.build.outputs.version }}" \
+            --force
+
+  deploy-prod:
+    name: Deploy prod
+    needs: [build, promote]
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: prod
+      image_digest: ${{ needs.build.outputs.digest }}
+      runs_on: '["self-hosted", "linux", "matterhub-prod"]'
+    secrets: inherit

@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # Self-hosted runners inside the prod VNet (private AKS, ACR and Key Vault).
+  labels:
+    - matterhub-prod

@@ -1,0 +1,123 @@
+# Reusable deployment workflow (called by cd.yml for each environment).
+# Reads the environment's Terraform outputs, deploys the Helm chart atomically,
+# runs `helm test` and an external smoke test that proves the expected commit is live.
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image_digest:
+        type: string
+        required: true
+      runs_on:
+        description: JSON for runs-on (a label string or an array of labels)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Helm deploy (${{ inputs.environment }})
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    environment:
+      name: ${{ inputs.environment }}
+      url: https://${{ vars.APP_HOSTNAME }}/version
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      NAMESPACE: matterhub
+      RELEASE: matterhub
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.13"
+          terraform_wrapper: false
+
+      - name: Read platform outputs from Terraform state (read-only)
+        id: tf
+        working-directory: infra/terraform/envs/${{ inputs.environment }}
+        run: |
+          terraform init -input=false -backend-config=backend.hcl > /dev/null
+          terraform output -json platform > "$RUNNER_TEMP/platform.json"
+          ai="$(jq -r .application_insights_connection_string "$RUNNER_TEMP/platform.json")"
+          echo "::add-mask::$ai"
+          for key in resource_group_name aks_name acr_login_server key_vault_name tenant_id \
+                     workload_identity_client_id postgres_fqdn postgres_administrator_login \
+                     postgres_database_name postgres_subnet_cidr; do
+            echo "${key}=$(jq -r ".${key}" "$RUNNER_TEMP/platform.json")" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.1.6
+
+      - name: Get AKS credentials (Entra ID, no local accounts)
+        run: |
+          az aks get-credentials --resource-group "${{ steps.tf.outputs.resource_group_name }}" \
+            --name "${{ steps.tf.outputs.aks_name }}" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+
+      - name: Record the currently deployed revision (for the rollback summary)
+        id: before
+        run: echo "revision=$(helm history "$RELEASE" -n "$NAMESPACE" --max 1 -o json 2>/dev/null | jq -r '.[0].revision // "none"')" >> "$GITHUB_OUTPUT"
+
+      - name: helm upgrade --atomic
+        run: |
+          ai="$(jq -r .application_insights_connection_string "$RUNNER_TEMP/platform.json")"
+          helm upgrade --install "$RELEASE" deploy/helm/matterhub \
+            --namespace "$NAMESPACE" \
+            -f deploy/helm/matterhub/values.yaml \
+            -f "deploy/helm/matterhub/values-${ENVIRONMENT}.yaml" \
+            --set image.repository="${{ steps.tf.outputs.acr_login_server }}/matterhub" \
+            --set image.digest="${{ inputs.image_digest }}" \
+            --set workloadIdentity.clientId="${{ steps.tf.outputs.workload_identity_client_id }}" \
+            --set keyVault.name="${{ steps.tf.outputs.key_vault_name }}" \
+            --set keyVault.tenantId="${{ steps.tf.outputs.tenant_id }}" \
+            --set config.entraTenantId="${{ steps.tf.outputs.tenant_id }}" \
+            --set config.entraAudience="${{ vars.API_AUDIENCE }}" \
+            --set config.database.host="${{ steps.tf.outputs.postgres_fqdn }}" \
+            --set config.database.user="${{ steps.tf.outputs.postgres_administrator_login }}" \
+            --set config.database.name="${{ steps.tf.outputs.postgres_database_name }}" \
+            --set networkPolicy.databaseCidr="${{ steps.tf.outputs.postgres_subnet_cidr }}" \
+            --set ingress.host="${{ vars.APP_HOSTNAME }}" \
+            --set ingress.tls.keyVaultCertificateUri="${{ vars.TLS_CERT_KEYVAULT_URI }}" \
+            --set-string config.applicationInsightsConnectionString="$ai" \
+            --atomic --wait --timeout 10m --history-max 10
+
+      - name: helm test (in-cluster readiness)
+        run: helm test "$RELEASE" -n "$NAMESPACE" --logs --timeout 3m
+
+      - name: External smoke test (expected commit is serving)
+        run: ./scripts/smoke-test.sh "https://${{ vars.APP_HOSTNAME }}" "${GITHUB_SHA}"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "### ${ENVIRONMENT}: ${{ job.status }}"
+            echo "- image digest: \`${{ inputs.image_digest }}\`"
+            echo "- previous Helm revision: ${{ steps.before.outputs.revision }}"
+            echo "- rollback: \`helm rollback ${RELEASE} ${{ steps.before.outputs.revision }} -n ${NAMESPACE}\` (see docs/runbooks/rollback.md)"
+          } >> "$GITHUB_STEP_SUMMARY"

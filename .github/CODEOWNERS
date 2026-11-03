@@ -1,0 +1,8 @@
+# Reviews are requested automatically from these owners. Replace with your team handles.
+*                       @your-org/matterhub-devs
+/infra/                 @your-org/matterhub-platform
+/deploy/                @your-org/matterhub-platform
+/.github/workflows/     @your-org/matterhub-platform
+/azure-pipelines/       @your-org/matterhub-platform
+/app/src/matterhub/auth.py  @your-org/matterhub-devs @your-org/cyber-security
+/docs/security.md       @your-org/cyber-security

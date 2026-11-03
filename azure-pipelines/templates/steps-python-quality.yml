@@ -1,0 +1,48 @@
+# Lint, type-check and test the Python app; publish results to the pipeline UI.
+parameters:
+  - name: pythonVersion
+    type: string
+    default: "3.13"
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: ${{ parameters.pythonVersion }}
+
+  - bash: |
+      set -euo pipefail
+      pip install --require-hashes --no-deps -r requirements.txt
+      pip install -r requirements-dev.txt
+      pip install --no-deps -e .
+    workingDirectory: app
+    displayName: Install dependencies
+
+  - bash: ruff check . && ruff format --check . && mypy
+    workingDirectory: app
+    displayName: Ruff and mypy
+
+  - bash: pytest --cov --cov-report=xml --junitxml=junit.xml
+    workingDirectory: app
+    displayName: Unit tests (SQLite)
+
+  - bash: pytest -p no:cacheprovider
+    workingDirectory: app
+    displayName: Integration tests (PostgreSQL service container)
+    env:
+      MATTERHUB_TEST_DATABASE_URL: postgresql+psycopg://matterhub:ci-only-password@localhost:5432/matterhub_test
+
+  - bash: pip install pip-audit && pip-audit --strict --require-hashes --disable-pip -r requirements.txt
+    workingDirectory: app
+    displayName: Dependency vulnerability audit
+
+  - task: PublishTestResults@2
+    condition: succeededOrFailed()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: app/junit.xml
+      testRunTitle: MatterHub unit tests
+
+  - task: PublishCodeCoverageResults@2
+    condition: succeededOrFailed()
+    inputs:
+      summaryFileLocation: app/coverage.xml

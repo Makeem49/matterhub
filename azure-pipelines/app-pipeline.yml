@@ -1,0 +1,132 @@
+# Azure DevOps equivalent of .github/workflows/ci.yml + cd.yml.
+#
+# Build once -> deploy the same image digest to dev -> (approvals & checks) -> prod.
+# Azure access uses service connections with Workload Identity Federation (no secrets).
+# Approvals, business-hours windows and the "no active Azure Monitor alerts" gate are
+# configured as Checks on the matterhub-prod Environment (see azure-pipelines/README.md).
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [app/*, deploy/helm/*, azure-pipelines/app-pipeline.yml, azure-pipelines/templates/*]
+
+# PR validation for GitHub-hosted repos. For Azure Repos, add this pipeline as a
+# Build Validation branch policy on main instead.
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [app/*, deploy/*]
+
+resources:
+  containers:
+    - container: postgres
+      image: postgres:17-alpine
+      env:
+        POSTGRES_DB: matterhub_test
+        POSTGRES_USER: matterhub
+        POSTGRES_PASSWORD: ci-only-password
+      ports:
+        - 5432:5432
+
+variables:
+  - group: matterhub-common # linked to Key Vault-free values: ACR names, API audience, hostnames
+  - name: pythonVersion
+    value: "3.13"
+  - name: isMain
+    value: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+stages:
+  - stage: Build
+    displayName: Build, test and scan
+    jobs:
+      - job: Quality
+        displayName: Lint, types, tests
+        pool:
+          vmImage: ubuntu-latest
+        services:
+          postgres: postgres
+        steps:
+          - template: templates/steps-python-quality.yml
+            parameters:
+              pythonVersion: $(pythonVersion)
+
+      - job: Container
+        displayName: Build, scan and push image
+        dependsOn: Quality
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - template: templates/steps-container-build.yml
+            parameters:
+              containerRegistryConnection: sc-acr-matterhub-dev
+              registry: $(devAcrName).azurecr.io
+              push: ${{ eq(variables['Build.SourceBranch'], 'refs/heads/main') }}
+
+      - job: Helm
+        displayName: Helm lint and schema validation
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: HelmInstaller@1
+            inputs:
+              helmVersionToInstall: 3.16.2
+          - bash: |
+              set -euo pipefail
+              curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+              helm lint --strict deploy/helm/matterhub -f deploy/helm/matterhub/ci/test-values.yaml
+              for env in dev prod; do
+                helm template matterhub deploy/helm/matterhub -f "deploy/helm/matterhub/values-${env}.yaml" \
+                  -f deploy/helm/matterhub/ci/test-values.yaml \
+                  | ./kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.31.0
+              done
+            displayName: Lint and validate chart
+
+  - stage: DeployDev
+    displayName: Deploy dev
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables.isMain, true))
+    variables:
+      imageDigest: $[ stageDependencies.Build.Container.outputs['push.imageDigest'] ]
+    jobs:
+      - template: templates/jobs-helm-deploy.yml
+        parameters:
+          environment: dev
+          azureServiceConnection: sc-matterhub-dev
+          pool:
+            vmImage: ubuntu-latest
+          imageDigest: $(imageDigest)
+
+  - stage: DeployProd
+    displayName: Deploy prod
+    dependsOn: [Build, DeployDev]
+    condition: and(succeeded(), eq(variables.isMain, true))
+    variables:
+      imageDigest: $[ stageDependencies.Build.Container.outputs['push.imageDigest'] ]
+    jobs:
+      - job: Promote
+        displayName: Promote image to prod ACR
+        pool: matterhub-prod-mdp # Managed DevOps Pool inside the prod VNet
+        steps:
+          - checkout: none
+          - task: AzureCLI@2
+            displayName: az acr import (same digest that passed dev)
+            inputs:
+              azureSubscription: sc-matterhub-prod
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az acr import --name "$(prodAcrName)" \
+                  --source "$(devAcrName).azurecr.io/matterhub@$(imageDigest)" \
+                  --image "matterhub:$(Build.SourceVersion)" --force
+
+      - template: templates/jobs-helm-deploy.yml
+        parameters:
+          environment: prod
+          azureServiceConnection: sc-matterhub-prod
+          pool:
+            name: matterhub-prod-mdp
+          imageDigest: $(imageDigest)
+          dependsOn: [Promote]

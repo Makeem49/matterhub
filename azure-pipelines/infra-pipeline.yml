@@ -1,0 +1,111 @@
+# Azure DevOps equivalent of .github/workflows/infra.yml + foundation.yml.
+#
+#   Validate  -> fmt / validate / tflint / checkov / bicep lint
+#   Foundation-> Bicep what-if, then deploy (Environment: matterhub-foundation, approval)
+#   Dev       -> terraform plan -> apply saved plan -> ARM log alerts
+#   Prod      -> terraform plan -> [approval] -> apply saved plan -> ARM log alerts
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [infra/*, azure-pipelines/infra-pipeline.yml, azure-pipelines/templates/stage-terraform.yml]
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [infra/*]
+
+variables:
+  terraformVersion: 1.13.4
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+stages:
+  - stage: Validate
+    jobs:
+      - job: Static
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(terraformVersion)
+          - bash: |
+              set -euo pipefail
+              terraform fmt -check -recursive infra/terraform
+              for env in dev prod; do
+                terraform -chdir="infra/terraform/envs/${env}" init -backend=false -input=false
+                terraform -chdir="infra/terraform/envs/${env}" validate
+              done
+            displayName: terraform fmt and validate
+          - bash: |
+              set -euo pipefail
+              pip install checkov
+              checkov --config-file .checkov.yaml -d infra --framework terraform arm bicep
+            displayName: Checkov policy scan
+          - bash: |
+              set -euo pipefail
+              az bicep install
+              az bicep lint --file infra/bicep/main.bicep
+              az bicep build --file infra/bicep/main.bicep --outfile $(Build.ArtifactStagingDirectory)/foundation.json
+            displayName: Bicep lint and build (to ARM)
+          - publish: $(Build.ArtifactStagingDirectory)/foundation.json
+            artifact: foundation-arm
+
+  - stage: Foundation
+    dependsOn: Validate
+    condition: and(succeeded(), eq(variables.isMain, true))
+    jobs:
+      - job: WhatIf
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - task: AzureCLI@2
+            displayName: Bicep what-if
+            inputs:
+              azureSubscription: sc-matterhub-platform
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az deployment sub what-if --location uksouth \
+                  --template-file infra/bicep/main.bicep --parameters infra/bicep/main.bicepparam
+            env:
+              DEPLOYER_PRINCIPAL_ID: $(deployerPrincipalId)
+      - deployment: Deploy
+        dependsOn: WhatIf
+        pool:
+          vmImage: ubuntu-latest
+        environment: matterhub-foundation
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: AzureCLI@2
+                  displayName: Bicep deploy
+                  inputs:
+                    azureSubscription: sc-matterhub-platform
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az deployment sub create --location uksouth \
+                        --name "matterhub-foundation-$(Build.BuildId)" \
+                        --template-file infra/bicep/main.bicep --parameters infra/bicep/main.bicepparam
+                  env:
+                    DEPLOYER_PRINCIPAL_ID: $(deployerPrincipalId)
+
+  - template: templates/stage-terraform.yml
+    parameters:
+      environment: dev
+      azureServiceConnection: sc-matterhub-dev
+      pool:
+        vmImage: ubuntu-latest
+      dependsOn: [Validate]
+
+  - template: templates/stage-terraform.yml
+    parameters:
+      environment: prod
+      azureServiceConnection: sc-matterhub-prod
+      pool:
+        name: matterhub-prod-mdp
+      dependsOn: [Terraform_dev]

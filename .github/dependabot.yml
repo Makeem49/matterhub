@@ -1,0 +1,37 @@
+# Automated patching: Dependabot opens PRs for outdated or vulnerable dependencies.
+# Each PR goes through the full CI pipeline, so a patch is tested before it merges.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, python]
+
+  - package-ecosystem: docker
+    directory: /app
+    schedule:
+      interval: weekly
+    labels: [dependencies, docker]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+
+  - package-ecosystem: terraform
+    directories:
+      - /infra/terraform/envs/dev
+      - /infra/terraform/envs/prod
+      - /infra/terraform/stack
+    schedule:
+      interval: weekly
+    labels: [dependencies, terraform]

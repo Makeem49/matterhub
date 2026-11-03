@@ -1,0 +1,98 @@
+# One environment: plan (published as an artifact) -> deployment job applies that exact
+# plan after the Environment's approvals and checks -> ARM template for log alerts.
+parameters:
+  - name: environment
+    type: string
+  - name: azureServiceConnection
+    type: string
+  - name: pool
+    type: object
+  - name: dependsOn
+    type: object
+    default: []
+
+stages:
+  - stage: Terraform_${{ parameters.environment }}
+    displayName: Terraform ${{ parameters.environment }}
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: and(succeeded(), eq(variables.isMain, true))
+    jobs:
+      - job: Plan
+        pool: ${{ parameters.pool }}
+        steps:
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(terraformVersion)
+          - task: AzureCLI@2
+            displayName: terraform plan
+            inputs:
+              azureSubscription: ${{ parameters.azureServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              workingDirectory: infra/terraform/envs/${{ parameters.environment }}
+              inlineScript: |
+                set -euo pipefail
+                export ARM_CLIENT_ID="$servicePrincipalId" ARM_TENANT_ID="$tenantId"
+                export ARM_OIDC_TOKEN="$idToken" ARM_USE_OIDC=true ARM_USE_AZUREAD=true
+                export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                terraform init -input=false -backend-config=backend.hcl
+                terraform plan -input=false -out=tfplan
+                terraform show -no-color tfplan > plan.txt
+          - publish: infra/terraform/envs/${{ parameters.environment }}/tfplan
+            artifact: tfplan-${{ parameters.environment }}
+          - publish: infra/terraform/envs/${{ parameters.environment }}/plan.txt
+            artifact: plan-text-${{ parameters.environment }}
+
+      - deployment: Apply
+        dependsOn: Plan
+        pool: ${{ parameters.pool }}
+        environment: matterhub-infra-${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - download: current
+                  artifact: tfplan-${{ parameters.environment }}
+                - task: TerraformInstaller@1
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+                - task: AzureCLI@2
+                  displayName: terraform apply (saved plan)
+                  name: apply
+                  inputs:
+                    azureSubscription: ${{ parameters.azureServiceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    addSpnToEnvironment: true
+                    workingDirectory: infra/terraform/envs/${{ parameters.environment }}
+                    inlineScript: |
+                      set -euo pipefail
+                      export ARM_CLIENT_ID="$servicePrincipalId" ARM_TENANT_ID="$tenantId"
+                      export ARM_OIDC_TOKEN="$idToken" ARM_USE_OIDC=true ARM_USE_AZUREAD=true
+                      export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                      terraform init -input=false -backend-config=backend.hcl
+                      terraform apply -input=false "$(Pipeline.Workspace)/tfplan-${{ parameters.environment }}/tfplan"
+                      out="$(terraform output -json platform)"
+                      echo "##vso[task.setvariable variable=rg]$(jq -r .resource_group_name <<<"$out")"
+                      echo "##vso[task.setvariable variable=workspaceId]$(jq -r .log_analytics_workspace_id <<<"$out")"
+                      echo "##vso[task.setvariable variable=actionGroupId]$(jq -r .action_group_id <<<"$out")"
+                      echo "##vso[task.setvariable variable=subscriptionId]$ARM_SUBSCRIPTION_ID"
+
+                # The dedicated ARM task: incremental deployment of the hand-written template.
+                - task: AzureResourceManagerTemplateDeployment@3
+                  displayName: ARM template - log search alerts
+                  inputs:
+                    deploymentScope: Resource Group
+                    azureResourceManagerConnection: ${{ parameters.azureServiceConnection }}
+                    subscriptionId: $(subscriptionId)
+                    action: Create Or Update Resource Group
+                    resourceGroupName: $(rg)
+                    location: UK South
+                    templateLocation: Linked artifact
+                    csmFile: infra/arm/log-alerts/azuredeploy.json
+                    csmParametersFile: infra/arm/log-alerts/azuredeploy.parameters.${{ parameters.environment }}.json
+                    overrideParameters: -workspaceResourceId "$(workspaceId)" -actionGroupId "$(actionGroupId)"
+                    deploymentMode: Incremental
+                    deploymentName: log-alerts-$(Build.BuildId)

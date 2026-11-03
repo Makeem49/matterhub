@@ -1,0 +1,71 @@
+# Subscription foundation (Bicep): what-if on pull requests, deploy on main after approval.
+name: foundation
+
+on:
+  pull_request:
+    paths: ["infra/bicep/**", ".github/workflows/foundation.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/bicep/**", ".github/workflows/foundation.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: foundation
+  cancel-in-progress: false
+
+env:
+  LOCATION: uksouth
+
+jobs:
+  what-if:
+    name: Bicep what-if
+    runs-on: ubuntu-latest
+    environment: foundation-plan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: What-if (preview every change before it happens)
+        env:
+          DEPLOYER_PRINCIPAL_ID: ${{ vars.DEPLOYER_PRINCIPAL_ID }}
+        run: |
+          az deployment sub what-if \
+            --location "$LOCATION" \
+            --template-file infra/bicep/main.bicep \
+            --parameters infra/bicep/main.bicepparam \
+            --result-format FullResourcePayloads | tee whatif.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bicep-what-if
+          path: whatif.txt
+          retention-days: 7
+
+  deploy:
+    name: Bicep deploy
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: what-if
+    runs-on: ubuntu-latest
+    environment: foundation # platform team approval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy
+        env:
+          DEPLOYER_PRINCIPAL_ID: ${{ vars.DEPLOYER_PRINCIPAL_ID }}
+        run: |
+          az deployment sub create \
+            --name "matterhub-foundation-${GITHUB_RUN_NUMBER}" \
+            --location "$LOCATION" \
+            --template-file infra/bicep/main.bicep \
+            --parameters infra/bicep/main.bicepparam

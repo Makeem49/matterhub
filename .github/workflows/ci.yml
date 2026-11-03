@@ -1,0 +1,370 @@
+# Continuous integration: runs on every pull request and on main.
+# Only the jobs affected by a change run; "ci-passed" is the single required status check
+# in branch protection, so skipped jobs never block a merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+  HELM_VERSION: "v3.16.2"
+  KUBECONFORM_VERSION: "v0.6.7"
+  K8S_SCHEMA_VERSION: "1.31.0"
+  TF_VERSION: "~1.13"
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      helm: ${{ steps.filter.outputs.helm }}
+      terraform: ${{ steps.filter.outputs.terraform }}
+      bicep: ${{ steps.filter.outputs.bicep }}
+      scripts: ${{ steps.filter.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'app/**'
+              - '.github/workflows/ci.yml'
+            helm:
+              - 'deploy/**'
+            terraform:
+              - 'infra/terraform/**'
+            bicep:
+              - 'infra/bicep/**'
+              - 'infra/arm/**'
+            scripts:
+              - 'scripts/**'
+              - '.github/workflows/**'
+
+  # ---------------------------------------------------------------- application
+  app-quality:
+    name: App - lint, types, unit tests
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+      - name: Install
+        run: pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-dev.txt && pip install --no-deps -e .
+      - name: Ruff lint (incl. bandit security rules)
+        run: ruff check --output-format=github .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy (strict)
+        run: mypy
+      - name: Pytest with coverage gate
+        run: pytest --cov --cov-report=xml --cov-report=term --junitxml=junit.xml
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-test-results
+          path: |
+            app/junit.xml
+            app/coverage.xml
+          retention-days: 14
+
+  app-integration:
+    name: App - integration tests (PostgreSQL)
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: matterhub_test
+          POSTGRES_USER: matterhub
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U matterhub -d matterhub_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      MATTERHUB_TEST_DATABASE_URL: postgresql+psycopg://matterhub:ci-only-password@localhost:5432/matterhub_test
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: app/requirements*.txt
+      - run: pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-dev.txt && pip install --no-deps -e .
+      - name: Migrations apply cleanly to PostgreSQL
+        env:
+          MATTERHUB_AUTH_MODE: disabled
+          MATTERHUB_DATABASE_URL: ${{ env.MATTERHUB_TEST_DATABASE_URL }}
+        run: matterhub migrate
+      - name: Full test suite against PostgreSQL
+        run: pytest -p no:cacheprovider
+
+  app-dependency-audit:
+    name: App - dependency vulnerabilities
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pip-audit
+      - name: pip-audit (fails on any known vulnerability)
+        run: pip-audit --strict --require-hashes --disable-pip -r app/requirements.txt
+
+  container:
+    name: Container - build, lint, scan, smoke
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload Trivy SARIF to code scanning
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: app
+          load: true
+          tags: matterhub:ci
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trivy - fail on fixable HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: matterhub:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+      - name: Trivy - SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: matterhub:ci
+          format: sarif
+          output: trivy-image.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Smoke test the container (non-root, read-only filesystem)
+        run: |
+          docker run -d --name smoke --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges -p 8000:8000 \
+            -e MATTERHUB_AUTH_MODE=disabled matterhub:ci
+          for _ in $(seq 1 30); do curl -fsS localhost:8000/healthz && break; sleep 1; done
+          curl -fsS localhost:8000/readyz
+          test "$(curl -fsS localhost:8000/version | jq -r .git_sha)" = "${GITHUB_SHA}"
+          test "$(docker exec smoke id -u)" = "10001"
+      - name: Container logs
+        if: always()
+        run: docker logs smoke || true
+
+  # --------------------------------------------------------------- kubernetes
+  helm:
+    name: Helm - lint, render, schema-validate, policy
+    needs: changes
+    if: needs.changes.outputs.helm == 'true' || needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kubeconform
+      - name: helm lint
+        run: helm lint --strict deploy/helm/matterhub -f deploy/helm/matterhub/ci/test-values.yaml
+      - name: Render every environment and validate against the Kubernetes schema
+        run: |
+          mkdir -p rendered rendered-local
+          for env in dev prod; do
+            helm template matterhub deploy/helm/matterhub -n matterhub \
+              -f "deploy/helm/matterhub/values-${env}.yaml" \
+              -f deploy/helm/matterhub/ci/test-values.yaml > "rendered/${env}.yaml"
+          done
+          # local (kind) uses tags and a plain Secret by design: schema-check it, don't policy-check it
+          helm template matterhub deploy/helm/matterhub -n matterhub \
+            -f deploy/helm/matterhub/values-local.yaml > rendered-local/local.yaml
+          kubeconform -strict -summary -kubernetes-version "${K8S_SCHEMA_VERSION}" \
+            -ignore-missing-schemas rendered rendered-local deploy/local deploy/cluster
+      - name: Checkov (Kubernetes misconfiguration policy)
+        run: |
+          pip install checkov
+          checkov --config-file .checkov.yaml --framework kubernetes \
+            -d rendered -d deploy/local -d deploy/cluster
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-manifests
+          path: rendered/
+          retention-days: 7
+
+  # ------------------------------------------------------- infrastructure code
+  terraform:
+    name: Terraform - fmt, validate, lint, policy
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [dev, prod]
+    defaults:
+      run:
+        working-directory: infra/terraform/envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: terraform fmt
+        run: terraform fmt -check -recursive ../..
+      - name: terraform init (no backend)
+        run: terraform init -backend=false -input=false
+      - name: terraform validate
+        run: terraform validate
+      - uses: terraform-linters/setup-tflint@v4
+      - name: tflint (azurerm ruleset)
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl"
+          tflint --config "$GITHUB_WORKSPACE/infra/terraform/.tflint.hcl" --recursive --chdir ../..
+      - name: Checkov (Terraform security policy)
+        if: matrix.env == 'prod'
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/terraform
+          framework: terraform
+          config_file: .checkov.yaml
+
+  bicep-arm:
+    name: Bicep and ARM - build, lint, policy
+    needs: changes
+    if: needs.changes.outputs.bicep == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bicep build and lint (warnings as errors via bicepconfig.json)
+        run: |
+          az bicep install
+          az bicep lint --file infra/bicep/main.bicep
+          az bicep build --file infra/bicep/main.bicep --stdout > foundation.arm.json
+          az bicep build-params --file infra/bicep/main.bicepparam --stdout > /dev/null
+      - name: ARM template is valid JSON with the expected schema
+        run: |
+          for f in infra/arm/*/azuredeploy*.json; do
+            jq -e '."$schema" | test("deployment(Template|Parameters)\\.json")' "$f" > /dev/null
+          done
+      - name: Checkov (ARM and Bicep)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra
+          framework: arm,bicep
+          config_file: .checkov.yaml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: foundation-arm-template
+          path: foundation.arm.json
+          retention-days: 7
+
+  # ------------------------------------------------------- scripts & hygiene
+  scripts:
+    name: Scripts - shellcheck, PSScriptAnalyzer, pytest, actionlint
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $results = Invoke-ScriptAnalyzer -Path scripts/powershell -Recurse -Severity Warning,Error
+          $results | Format-Table -AutoSize
+          if ($results) { throw "PSScriptAnalyzer found $($results.Count) issue(s)" }
+      - name: Pester tests
+        shell: pwsh
+        run: |
+          Install-Module Pester -MinimumVersion 5.5 -Force -Scope CurrentUser -SkipPublisherCheck
+          Invoke-Pester -Path scripts/powershell/tests -CI
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Python automation tests
+        run: pip install pytest && pytest -q scripts/python/tests
+      - name: actionlint
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog (verified and unknown secrets)
+        uses: trufflesecurity/trufflehog@v3.88.0
+        with:
+          extra_args: --results=verified,unknown
+
+  ci-passed:
+    name: ci-passed
+    if: always()
+    needs:
+      [app-quality, app-integration, app-dependency-audit, container, helm, terraform, bicep-arm, scripts, secrets]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$RESULTS" | jq -e 'to_entries | map(.value.result) | any(. == "failure" or . == "cancelled")' > /dev/null; then
+            exit 1
+          fi

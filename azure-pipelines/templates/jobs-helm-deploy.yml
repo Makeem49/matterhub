@@ -1,0 +1,84 @@
+# Deployment job: reads Terraform outputs, deploys Helm atomically, tests, smoke-tests.
+# A `deployment` job records history against the Azure DevOps Environment, which is
+# where approvals and checks (Azure Monitor alerts gate, business hours) are attached.
+parameters:
+  - name: environment
+    type: string
+    values: [dev, prod]
+  - name: azureServiceConnection
+    type: string
+  - name: pool
+    type: object
+  - name: imageDigest
+    type: string
+  - name: dependsOn
+    type: object
+    default: []
+
+jobs:
+  - deployment: Deploy_${{ parameters.environment }}
+    displayName: Helm deploy (${{ parameters.environment }})
+    dependsOn: ${{ parameters.dependsOn }}
+    pool: ${{ parameters.pool }}
+    environment: matterhub-${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+
+            # TerraformInstaller comes from the Microsoft DevLabs "Terraform" extension.
+            - task: TerraformInstaller@1
+              inputs:
+                terraformVersion: 1.13.4
+
+            - task: HelmInstaller@1
+              inputs:
+                helmVersionToInstall: 3.16.2
+
+            - task: KubeloginInstaller@0
+
+            - task: AzureCLI@2
+              displayName: Deploy with Helm
+              inputs:
+                azureSubscription: ${{ parameters.azureServiceConnection }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                addSpnToEnvironment: true # exposes the federated token for Terraform
+                inlineScript: |
+                  set -euo pipefail
+                  export ARM_CLIENT_ID="$servicePrincipalId" ARM_TENANT_ID="$tenantId"
+                  export ARM_OIDC_TOKEN="$idToken" ARM_USE_OIDC=true ARM_USE_AZUREAD=true
+                  export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+
+                  pushd infra/terraform/envs/${{ parameters.environment }} > /dev/null
+                  terraform init -input=false -backend-config=backend.hcl > /dev/null
+                  out="$(terraform output -json platform)"
+                  popd > /dev/null
+                  get() { jq -r ".$1" <<<"$out"; }
+                  echo "##vso[task.setsecret]$(get application_insights_connection_string)"
+
+                  az aks get-credentials -g "$(get resource_group_name)" -n "$(get aks_name)" --overwrite-existing
+                  kubelogin convert-kubeconfig -l azurecli
+
+                  helm upgrade --install matterhub deploy/helm/matterhub \
+                    --namespace matterhub \
+                    -f deploy/helm/matterhub/values-${{ parameters.environment }}.yaml \
+                    --set image.repository="$(get acr_login_server)/matterhub" \
+                    --set image.digest="${{ parameters.imageDigest }}" \
+                    --set workloadIdentity.clientId="$(get workload_identity_client_id)" \
+                    --set keyVault.name="$(get key_vault_name)" \
+                    --set keyVault.tenantId="$(get tenant_id)" \
+                    --set config.entraTenantId="$(get tenant_id)" \
+                    --set config.entraAudience="$(apiAudience)" \
+                    --set config.database.host="$(get postgres_fqdn)" \
+                    --set config.database.user="$(get postgres_administrator_login)" \
+                    --set networkPolicy.databaseCidr="$(get postgres_subnet_cidr)" \
+                    --set ingress.host="$(appHostname_${{ parameters.environment }})" \
+                    --set-string config.applicationInsightsConnectionString="$(get application_insights_connection_string)" \
+                    --atomic --wait --timeout 10m --history-max 10
+
+                  helm test matterhub -n matterhub --logs --timeout 3m
+
+            - bash: ./scripts/smoke-test.sh "https://$(appHostname_${{ parameters.environment }})" "$(Build.SourceVersion)"
+              displayName: External smoke test
