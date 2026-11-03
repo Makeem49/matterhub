@@ -1,0 +1,242 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Log search alert rules for MatterHub (KQL over Log Analytics). Hand-written ARM JSON: deploy with `az deployment group create` or the AzureResourceManagerTemplateDeployment@3 task."
+  },
+  "parameters": {
+    "environment": {
+      "type": "string",
+      "allowedValues": [
+        "dev",
+        "staging",
+        "prod"
+      ]
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "workspaceResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace resource ID (Terraform output)."
+      }
+    },
+    "actionGroupId": {
+      "type": "string",
+      "metadata": {
+        "description": "Action group to notify (Terraform output)."
+      }
+    },
+    "runbookBaseUrl": {
+      "type": "string",
+      "defaultValue": "https://github.com/your-org/matterhub/blob/main/docs/runbooks"
+    },
+    "authFailureThreshold": {
+      "type": "int",
+      "defaultValue": 50,
+      "minValue": 1
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {
+        "service": "matterhub",
+        "managed-by": "arm"
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-12-01",
+      "name": "[format('lalert-matterhub-{0}-api-5xx', parameters('environment'))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "displayName": "[format('MatterHub ({0}): API returning 5xx errors', parameters('environment'))]",
+        "description": "More than 20 server errors in 5 minutes, from container logs. Complements the Prometheus burn-rate alert when metrics scraping is broken.",
+        "severity": 2,
+        "enabled": true,
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT5M",
+        "scopes": [
+          "[parameters('workspaceResourceId')]"
+        ],
+        "targetResourceTypes": [
+          "Microsoft.OperationalInsights/workspaces"
+        ],
+        "autoMitigate": true,
+        "criteria": {
+          "allOf": [
+            {
+              "query": "ContainerLogV2\n| where PodNamespace startswith \"matterhub\"\n| where ContainerName == \"api\"\n| extend log = todynamic(LogMessage)\n| where tostring(log.message) == \"request\" and toint(log.status) >= 500\n| extend route = tostring(log.route)",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 20,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              },
+              "dimensions": [
+                {
+                  "name": "route",
+                  "operator": "Include",
+                  "values": [
+                    "*"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[parameters('actionGroupId')]"
+          ],
+          "customProperties": {
+            "runbook": "[format('{0}/high-error-rate.md', parameters('runbookBaseUrl'))]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-12-01",
+      "name": "[format('lalert-matterhub-{0}-auth-failures', parameters('environment'))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "displayName": "[format('MatterHub ({0}): spike in rejected tokens / access denied', parameters('environment'))]",
+        "description": "Possible credential stuffing, a misconfigured client, or an Entra ID app-role change.",
+        "severity": 2,
+        "enabled": true,
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT15M",
+        "scopes": [
+          "[parameters('workspaceResourceId')]"
+        ],
+        "targetResourceTypes": [
+          "Microsoft.OperationalInsights/workspaces"
+        ],
+        "autoMitigate": true,
+        "criteria": {
+          "allOf": [
+            {
+              "query": "ContainerLogV2\n| where PodNamespace startswith \"matterhub\"\n| extend log = todynamic(LogMessage)\n| where tostring(log.message) in (\"token_rejected\", \"access_denied\")",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": "[parameters('authFailureThreshold')]",
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[parameters('actionGroupId')]"
+          ],
+          "customProperties": {
+            "runbook": "[format('{0}/security-incident.md', parameters('runbookBaseUrl'))]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-12-01",
+      "name": "[format('lalert-matterhub-{0}-retention-missing', parameters('environment'))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "displayName": "[format('MatterHub ({0}): retention job has not completed in 26 hours', parameters('environment'))]",
+        "description": "The daily retention CronJob has not logged a successful run. Records due for review are not being flagged.",
+        "severity": 3,
+        "enabled": true,
+        "evaluationFrequency": "PT1H",
+        "windowSize": "PT26H",
+        "scopes": [
+          "[parameters('workspaceResourceId')]"
+        ],
+        "targetResourceTypes": [
+          "Microsoft.OperationalInsights/workspaces"
+        ],
+        "autoMitigate": true,
+        "criteria": {
+          "allOf": [
+            {
+              "query": "ContainerLogV2\n| where PodNamespace startswith \"matterhub\"\n| extend log = todynamic(LogMessage)\n| where tostring(log.message) == \"retention_job_complete\"",
+              "timeAggregation": "Count",
+              "operator": "LessThan",
+              "threshold": 1,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[parameters('actionGroupId')]"
+          ],
+          "customProperties": {
+            "runbook": "[format('{0}/retention-job-failed.md', parameters('runbookBaseUrl'))]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-12-01",
+      "name": "[format('lalert-matterhub-{0}-keyvault-denied', parameters('environment'))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "properties": {
+        "displayName": "[format('MatterHub ({0}): Key Vault requests denied', parameters('environment'))]",
+        "description": "403s on the MatterHub Key Vault: an identity is trying to read secrets it is not allowed to.",
+        "severity": 1,
+        "enabled": true,
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT5M",
+        "scopes": [
+          "[parameters('workspaceResourceId')]"
+        ],
+        "targetResourceTypes": [
+          "Microsoft.OperationalInsights/workspaces"
+        ],
+        "autoMitigate": true,
+        "criteria": {
+          "allOf": [
+            {
+              "query": "AzureDiagnostics\n| where ResourceProvider == \"MICROSOFT.KEYVAULT\" and Resource startswith \"KV-MATTERHUB\"\n| where httpStatusCode_d == 403",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[parameters('actionGroupId')]"
+          ],
+          "customProperties": {
+            "runbook": "[format('{0}/security-incident.md', parameters('runbookBaseUrl'))]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "alertRuleNames": {
+      "type": "array",
+      "value": "[createArray(format('lalert-matterhub-{0}-api-5xx', parameters('environment')), format('lalert-matterhub-{0}-auth-failures', parameters('environment')), format('lalert-matterhub-{0}-retention-missing', parameters('environment')), format('lalert-matterhub-{0}-keyvault-denied', parameters('environment')))]"
+    }
+  }
+}

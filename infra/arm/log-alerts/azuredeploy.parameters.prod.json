@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environment": {
+      "value": "prod"
+    },
+    "workspaceResourceId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/rg-matterhub-prod/providers/Microsoft.OperationalInsights/workspaces/log-matterhub-prod"
+    },
+    "actionGroupId": {
+      "value": "/subscriptions/<subscription-id>/resourceGroups/rg-matterhub-prod/providers/Microsoft.Insights/actionGroups/ag-matterhub-prod"
+    },
+    "authFailureThreshold": {
+      "value": 25
+    }
+  }
+}
