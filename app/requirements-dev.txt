@@ -107,7 +107,7 @@ requests==2.34.2
     #   pip-audit
 rich==15.0.0
     # via pip-audit
-ruff==0.17.3
+ruff==0.17.5
     # via -r requirements-dev.in
 sortedcontainers==2.4.0
     # via cyclonedx-python-lib
@@ -119,6 +119,7 @@ typing-extensions==4.16.0
     # via
     #   -c requirements.txt
     #   anyio
+    #   cyclonedx-python-lib
     #   mypy
 urllib3==2.8.0
     # via
