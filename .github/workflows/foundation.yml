@@ -26,8 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: foundation-plan
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v2
+      - uses: actions/checkout@v7
+      - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -41,7 +41,7 @@ jobs:
             --template-file infra/bicep/main.bicep \
             --parameters infra/bicep/main.bicepparam \
             --result-format FullResourcePayloads | tee whatif.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bicep-what-if
           path: whatif.txt
@@ -54,8 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: foundation # platform team approval
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v2
+      - uses: actions/checkout@v7
+      - uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
